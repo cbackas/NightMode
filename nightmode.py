@@ -62,7 +62,7 @@ class LEDController:
     # init logi led DLL and turn lights off
     def enable_nightmode(self):
         logi_led.logi_led_init()
-        time.sleep(1)
+        time.sleep(0.5)
         logi_led.logi_led_set_lighting(0, 0, 0)
 
     # shut down the logi led DLL returning lights to normal
