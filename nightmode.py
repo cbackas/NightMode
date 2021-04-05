@@ -14,15 +14,18 @@ auth_token = ''
 ha_monitored_entity_id = ''
 
 last_id = 0
+request_cache = []
 
 
 def main():
+    # get led controller instance and set to default state
+    led = LEDController()
+    led.default()
+
     # connect to websocket server
     ws = websocket.WebSocket()
     ws.connect(ws_url)
-
-    # get led controller instance
-    led = LEDController()
+    print("Initializing websocket connection...")
 
     # Infinite loop waiting for WebSocket data
     while True:
@@ -34,7 +37,11 @@ def handle_messages(ws, led):
     msg = ws.recv()
 
     # convert to json
-    json_msg = json.loads(msg)
+    try:
+        json_msg = json.loads(msg)
+    except json.decoder.JSONDecodeError:
+        print(f'Error decoding message to JSON: {msg}')
+        return
 
     # handle different message types
     msg_type = json_msg['type']
@@ -45,14 +52,27 @@ def handle_messages(ws, led):
         send_auth(ws)
     elif msg_type == 'auth_ok':
         print('Authenticated')
+        # subscribe to state change events
         send_event_subscription(ws)
+        # get initial states to properly set keyboard LEDs upon connection
+        send_states_request(ws)
     elif msg_type == 'auth_invalid':
         print('Auth Failed: ' + json_msg['message'])
     elif msg_type == 'result':
-        if json_msg['success']:
-            print('Successfully subscribed to state_change events')
-        else:
-            print('Failed to subscribe to state_change events')
+        # compare the result ID to our cached requests in order to process the result correctly
+        result_id = json_msg['id']
+        origin_request = next(
+            (item for item in request_cache if item['id'] == result_id), None)
+        if origin_request:
+            success = json_msg['success']
+            origin_request_type = origin_request['type']
+            if origin_request_type == 'subscribe_events':
+                if success:
+                    print('Successfully subscribed to state_change events')
+                else:
+                    print('Failed to subscribe to state_change events')
+            elif origin_request_type == 'get_states':
+                handle_all_states(json_msg, led)
     else:
         print(msg)
 
@@ -69,6 +89,10 @@ class LEDController:
     def disable_nightmode(self):
         logi_led.logi_led_shutdown()
 
+    # defines default state
+    def default(self):
+        self.disable_nightmode()
+
 
 # handle state_change events
 # filter out non monitor power related events
@@ -77,17 +101,41 @@ def handle_event(json_msg, led):
     entity_id = json_msg['event']['data']['entity_id']
     if entity_id == ha_monitored_entity_id:
         state = json_msg['event']['data']['new_state']['state']
-        if state == 'on':
-            led.disable_nightmode()
-        elif state == 'off':
-            led.enable_nightmode()
-        print('Monitor Power State Updated: Nightmode ' + state)
+        handle_monitor_state(state, led)
+
+
+# takes in a list of all HA states
+# filter out non monitor power related events
+# set keyboard led's to corrispond with monitor power state
+def handle_all_states(json_msg, led):
+    results = json_msg['result']
+    monitor = next(
+        (item
+         for item in results if item['entity_id'] == ha_monitored_entity_id),
+        None)
+    if monitor:
+        handle_monitor_state(monitor['state'], led)
+
+
+# takes in monitor state (on, off, etc) and LED instance
+# sets nightmode to the correct state with logging
+def handle_monitor_state(state, led):
+    if state in ['on', 'unavailable']:
+        led.disable_nightmode()
+        print('Monitor Power State Updated: Nightmode disabled')
+    elif state == 'off':
+        led.enable_nightmode()
+        print('Monitor Power State Updated: Nightmode enabled')
 
 
 # send a py dict (frame) as json to the socket server
 def send_frame(ws, frame):
     json_string = json.dumps(frame)
     ws.send(json_string)
+
+    # cache requests so the can be processed in context on return
+    if (frame['type'] != 'auth'):
+        request_cache.append(frame)
 
 
 # send frame to authenticate
@@ -108,5 +156,25 @@ def send_event_subscription(ws):
     send_frame(ws, sub_frame)
 
 
+# send frame to request all HA entity states
+# needed to get initial state upon script start (or restart)
+def send_states_request(ws):
+    global last_id
+    last_id += 1
+    state_request_frame = {"id": last_id, "type": "get_states"}
+    send_frame(ws, state_request_frame)
+
+
 # execution starts here
-main()
+# do some looping so errors can be caught and the execution of the whole script restarted
+while True:
+    try:
+        main()
+    except ConnectionError:
+        print("Connection Error: Restarting script")
+        time.sleep(5)
+        continue
+    except OSError:
+        print("OSError: Restarting script")
+        time.sleep(5)
+        continue
