@@ -178,3 +178,7 @@ while True:
         print("OSError: Restarting script")
         time.sleep(5)
         continue
+    except websocket._exceptions.WebSocketException:
+        print("WebSocket Exception: Restarting script")
+        time.sleep(5)
+        continue
